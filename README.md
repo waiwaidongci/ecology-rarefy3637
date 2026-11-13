@@ -34,9 +34,20 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 ## 实体与页面
 
-五个核心实体Survey、Transect、SpeciesCount、DiversityRun、ConservationNote贯穿表/model/schema/service/route/API/store/UI。六页为研究首页、调查与样线、共同量配置、多样性结果、观察建议、田野留痕。RarefactionCurve、DiversitySummary、RunTable跨页复用，同时有共享Table/Badge/Notice/Empty。
+五个核心实体Survey、Transect、SpeciesCount、DiversityRun、ConservationNote贯穿表/model/schema/service/route/API/store/UI，另加UploadBatch、UploadItem支撑离线整批回传。七页为研究首页、调查与样线、回传与冲突、共同量配置、多样性结果、观察建议、田野留痕。RarefactionCurve、DiversitySummary、RunTable跨页复用，uploads下field-uploads的BatchSubmitForm与BatchDetail服务回传页，同时有共享Table/Badge/Notice/Empty。
 
 调查期内样线reference唯一，样线内species唯一并有数据库非负CHECK；API对重复物种行明确422，要求上游先汇总，不静默覆盖。S01—S24为允许物种；未知编码、负数、非整数计数拒绝，未提供物种按零计算。单种每行上限100000、样线总N上限2400000；研究最多选择同一期30条样线。支持新调查期和JSON计数录入，不提供CSV解析器。
+
+## 离线整批回传与冲突处置
+
+野外两组对同一期样线离线补录、并发回传时，单条录入遇重号即409失败的问题由整批回传替代：`POST /uploads` 一次提交一个批次（最多200行），批次内新样线、已改样线、重复重发与坏行分别处置，**不再整批失败**。
+
+- **批次幂等**：`batch_ref` 是野外端幂等键，对相同批次号+完全相同内容的重发只累计 `redeliveries`、返回原批次与原明细，不新增样线、计数行或修订号；同批次号内容不同则409拒绝。并发相同提交靠 `upload_batches.batch_ref` 唯一约束收口为重发。
+- **逐项处置**：新样线直接建档（`accepted`）；内容与现行一致的记为 `duplicate`，不增计数与修订号；同编号但内容不同的记为 `conflict` 并保留冲突时的现行快照、逐项计数/元数据差异与基线内容指纹，**旧副本不覆盖新计数**；坏行（非对象、缺字段、未知物种、负数、小数、布尔、行内物种重复、超限）记为 `rejected` 并逐行注明拒收原因，可接收行照常落库。
+- **冲突确认**：`POST /upload-items/{id}/resolution` 由录入角色选择 `overwrite`（确认覆盖，样线修订号+1、重写计数与内容指纹）或 `keep`（保留现行计数、拒绝副本），处理人、时间与说明写入明细并留审计。
+- **确认期间再核对**：处理冲突时比对现行样线指纹与冲突记录的基线指纹，若源数据在确认期间又被修改，本次处理被409拒绝，明细标记 `recheck_required` 并刷新快照与差异，页面显示“源数据已漂移”，需重新核对后才能确认；回传明细本身被改动则要求重新提交。
+- **数据模型**：`transects` 增加 `revision`（修订号，默认1）、`content_hash`（名称/生境/24种计数规范化SHA-256，旧数据首次比对时惰性补算）、`updated_at`；新增 `upload_batches`（批次号、载荷指纹、状态、重发次数）与 `upload_items`（行号、状态、原因、回传内容、现行快照、差异、基线指纹、处理记录）两张表，结构见 `backend/migrations/002_upload_batches.sql`。
+- **页面**：导航“03 / 回传与冲突”可提交整批JSON、查看批次列表与每条回传明细（接收/重复/冲突/拒收/已处理计数、差异对照、漂移标记），并在页面内完成覆盖或保留处理；viewer只读，写入与冲突处理返回403。
 
 ## 算法口径
 
@@ -81,9 +92,9 @@ npm ci
 npm run dev
 ```
 
-目录：backend/src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}；backend/scripts/seed_demo.py；backend/migrations/；frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}。metadata首次建表，migrations记录结构，未配置生产增量迁移。seed按自然键插入，已有数据/用户修改不覆盖，基准运行仅缺失时计算。请求ID/全局错误两个中间件；AuditLog记录登录、录入、研究、建议复核；CSV对公式前缀转义。
+目录：backend/src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}；backend/scripts/seed_demo.py；backend/migrations/；backend/tests/（回传集成69项、并发7项、全应用E2E 31项，基于SQLite+TestClient，无需Docker）；frontend/src/{api,stores,types,components/common,components/field-uploads,hooks,pages,router,utils,constants}。metadata首次建表，migrations记录结构（002为回传批次增量），未配置生产增量迁移。seed按自然键插入，已有数据/用户修改不覆盖，基准运行仅缺失时计算。请求ID/全局错误两个中间件；AuditLog记录登录、录入、回传/重发/冲突处理与重新核对、研究、建议复核；CSV对公式前缀转义。
 
-共享枚举位置：backend/src/constants/enums.py的Role/RunStatus/NoteStatus/TransectStatus；frontend/src/constants/enums.ts对应角色/运行/建议/资格标签；使用于鉴权、服务/schema与Badge/Layout/页面。75个职责源文件，不计__init__及配置。全部测试脚本、真实截图、CSV、日志和报告仅位于批次根test-artifacts/gb-0014；TESTING.md列真实结果与已知差异。
+共享枚举位置：backend/src/constants/enums.py的Role/RunStatus/NoteStatus/TransectStatus/BatchStatus/ItemStatus；frontend/src/constants/enums.ts对应角色/运行/建议/资格/回传状态标签；使用于鉴权、服务/schema与Badge/Layout/页面。82个职责源文件，不计__init__及配置。全部测试脚本、真实截图、CSV、日志和报告仅位于批次根test-artifacts/gb-0014；TESTING.md列真实结果与已知差异。
 
 ## 范围与License
 

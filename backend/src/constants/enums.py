@@ -15,3 +15,12 @@ class NoteStatus(StrEnum):
 class TransectStatus(StrEnum):
  ELIGIBLE='eligible'
  EMPTY='empty'
+class BatchStatus(StrEnum):
+ OPEN='open'
+ CLOSED='closed'
+class ItemStatus(StrEnum):
+ ACCEPTED='accepted'
+ DUPLICATE='duplicate'
+ CONFLICT='conflict'
+ REJECTED='rejected'
+ RESOLVED='resolved'
